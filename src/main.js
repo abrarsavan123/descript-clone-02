@@ -652,11 +652,20 @@ function initEditor() {
       const el = transcriptEl.querySelector(`.word[data-idx="${idx}"]`);
       if (el) {
         el.classList.add('active');
-        // Only auto-scroll if user explicitly enabled Follow mode
-        if (followPlayback && state.isPlaying) {
-          const top = el.offsetTop;
-          if (top > transcriptEl.scrollTop + transcriptEl.clientHeight - 60 || top < transcriptEl.scrollTop) {
-            transcriptEl.scrollTo({ top: top - transcriptEl.clientHeight / 3, behavior: 'smooth' });
+
+        if (state.isPlaying) {
+          const elTop = el.offsetTop;
+          const viewBottom = transcriptEl.scrollTop + transcriptEl.clientHeight;
+
+          // Default: teleprompter — only scroll forward when word reaches bottom edge
+          // Never scroll upward (user scrolled up intentionally, don't fight them)
+          if (elTop > viewBottom - 80) {
+            transcriptEl.scrollTo({ top: elTop - transcriptEl.clientHeight + 120, behavior: 'smooth' });
+          }
+
+          // Follow mode: also scroll up if word is above the visible area
+          if (followPlayback && elTop < transcriptEl.scrollTop) {
+            transcriptEl.scrollTo({ top: elTop - 40, behavior: 'smooth' });
           }
         }
       }
