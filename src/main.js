@@ -365,16 +365,17 @@ function initEditor() {
   function renderTranscript() {
     const words = state.transcript.words;
     let html = '';
-    let lastSegIdx = -1;
+    let inParagraph = false;
 
     words.forEach((w, i) => {
-      // Find segment for speaker labels
-      const segIdx = state.transcript.segments.findIndex(s => w.start >= s.start && w.start < s.end);
-      if (segIdx !== lastSegIdx && segIdx >= 0) {
-        if (lastSegIdx >= 0) html += '</div>'; // close prev speaker-block
-        const segNum = segIdx + 1;
-        html += `<div class="speaker-label"><div class="speaker-avatar">S${segNum}</div>Segment ${segNum}</div><div class="speaker-block">`;
-        lastSegIdx = segIdx;
+      // Start a new paragraph on gaps > 2 seconds or at the very start
+      const prevEnd = i > 0 ? words[i - 1].end : 0;
+      const gap = w.start - prevEnd;
+
+      if (!inParagraph || gap > 2) {
+        if (inParagraph) html += '</p>';
+        html += '<p class="transcript-paragraph">';
+        inParagraph = true;
       }
 
       const isDeleted = isWordDeleted(i);
@@ -385,7 +386,7 @@ function initEditor() {
 
       html += `<span class="${cls}" data-idx="${i}" data-start="${w.start}" data-end="${w.end}">${escHtml(w.text)} </span>`;
     });
-    if (lastSegIdx >= 0) html += '</div>';
+    if (inParagraph) html += '</p>';
     transcriptEl.innerHTML = html;
   }
 

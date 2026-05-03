@@ -485,37 +485,14 @@ input { font-family: var(--font); }
   font-size: 0.95rem;
 }
 
-/* Speaker labels */
-.speaker-label {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 20px;
-  margin-bottom: 8px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--accent-light);
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
+/* Paragraph styling */
+.transcript-paragraph {
+  margin: 0 0 16px 0;
+  line-height: 2;
 }
 
-.speaker-label:first-child { margin-top: 0; }
-
-.speaker-avatar {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: var(--accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.7rem;
-  font-weight: 700;
-  color: white;
-}
-
-.speaker-block {
-  padding-left: 34px;
+.transcript-paragraph:first-child {
+  margin-top: 0;
 }
 
 /* Word styling */

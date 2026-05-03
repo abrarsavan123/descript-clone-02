@@ -163,6 +163,7 @@ app.post('/api/download', async (req, res) => {
 
 // ─── POST /api/transcribe ─────────────────────────────────────────
 // Uses YouTube's free auto-generated captions via yt-dlp (no API key needed!)
+// Downloads srv3 format which has WORD-LEVEL timestamps
 
 app.post('/api/transcribe', async (req, res) => {
   const { videoId, url } = req.body;
@@ -177,141 +178,201 @@ app.post('/api/transcribe', async (req, res) => {
   }
 
   try {
-    console.log('Downloading YouTube captions...');
+    console.log('Downloading YouTube captions (srv3 for word-level timing)...');
 
-    // Download auto-generated subtitles in VTT format (has word-level timestamps)
     const subPath = path.join(MEDIA_DIR, videoId);
-    
-    // Try to get subtitles — first auto-generated, then manual
+    const videoUrl = url || `https://www.youtube.com/watch?v=${videoId}`;
+
+    // Download srv3 format — auto-generated captions have word-by-word <s> tags
+    // Use --write-auto-sub ONLY (manual subs don't have word timing)
     await execFileAsync(YTDLP_PATH, [
       '--write-auto-sub',
-      '--write-sub',
       '--sub-lang', 'en',
-      '--sub-format', 'json3',
+      '--sub-format', 'srv3',
       '--skip-download',
       '--no-playlist',
       '-o', subPath,
-      url || `https://www.youtube.com/watch?v=${videoId}`,
+      videoUrl,
     ], { maxBuffer: 10 * 1024 * 1024 });
 
-    // Find the subtitle file (yt-dlp adds language suffix)
-    const possibleFiles = [
-      `${subPath}.en.json3`,
-      `${subPath}.en-orig.json3`,
-    ];
-    
-    let subFile = null;
-    for (const f of possibleFiles) {
-      if (fs.existsSync(f)) { subFile = f; break; }
+    // Find the srv3 file
+    const files = fs.readdirSync(MEDIA_DIR);
+    let subFile = files.find(f => f.startsWith(videoId) && f.endsWith('.srv3'));
+
+    if (subFile) {
+      const srv3Content = fs.readFileSync(path.join(MEDIA_DIR, subFile), 'utf-8');
+      const result = parseSrv3(srv3Content);
+      fs.writeFileSync(transcriptPath, JSON.stringify(result, null, 2));
+      console.log(`Transcription complete (srv3): ${result.words.length} words`);
+      return res.json(result);
     }
 
-    // Also check for any json3 file with this video ID
-    if (!subFile) {
-      const files = fs.readdirSync(MEDIA_DIR);
-      const match = files.find(f => f.startsWith(videoId) && f.endsWith('.json3'));
-      if (match) subFile = path.join(MEDIA_DIR, match);
+    // Fallback: try json3
+    console.log('srv3 not found, trying json3...');
+    await execFileAsync(YTDLP_PATH, [
+      '--write-auto-sub', '--write-sub', '--sub-lang', 'en',
+      '--sub-format', 'json3', '--skip-download', '--no-playlist',
+      '-o', subPath, videoUrl,
+    ], { maxBuffer: 10 * 1024 * 1024 });
+
+    subFile = files.find(f => f.startsWith(videoId) && f.endsWith('.json3'));
+    if (subFile) {
+      const json3Data = JSON.parse(fs.readFileSync(path.join(MEDIA_DIR, subFile), 'utf-8'));
+      const result = parseJson3(json3Data);
+      fs.writeFileSync(transcriptPath, JSON.stringify(result, null, 2));
+      console.log(`Transcription complete (json3): ${result.words.length} words`);
+      return res.json(result);
     }
 
-    if (!subFile) {
-      // Fallback: try VTT format
-      console.log('json3 not found, trying VTT format...');
-      await execFileAsync(YTDLP_PATH, [
-        '--write-auto-sub',
-        '--write-sub',
-        '--sub-lang', 'en',
-        '--sub-format', 'vtt',
-        '--skip-download',
-        '--no-playlist',
-        '-o', subPath,
-        url || `https://www.youtube.com/watch?v=${videoId}`,
-      ], { maxBuffer: 10 * 1024 * 1024 });
-
-      const vttFiles = fs.readdirSync(MEDIA_DIR).filter(f => f.startsWith(videoId) && f.endsWith('.vtt'));
-      if (vttFiles.length > 0) {
-        subFile = path.join(MEDIA_DIR, vttFiles[0]);
-        const result = parseVTT(fs.readFileSync(subFile, 'utf-8'));
-        fs.writeFileSync(transcriptPath, JSON.stringify(result, null, 2));
-        console.log(`Transcription complete (VTT): ${result.words.length} words`);
-        return res.json(result);
-      }
-
-      return res.status(404).json({ error: 'No captions available for this video. Try a video with English subtitles.' });
-    }
-
-    // Parse json3 format (YouTube's native format with word-level timing)
-    const json3Data = JSON.parse(fs.readFileSync(subFile, 'utf-8'));
-    const result = parseJson3(json3Data);
-
-    fs.writeFileSync(transcriptPath, JSON.stringify(result, null, 2));
-    console.log(`Transcription complete: ${result.words.length} words`);
-
-    res.json(result);
+    return res.status(404).json({ error: 'No captions available for this video.' });
   } catch (err) {
     console.error('Transcription error:', err);
     res.status(500).json({ error: 'Failed to get captions: ' + err.message });
   }
 });
 
-// Parse YouTube json3 subtitle format into word-level timestamps
-function parseJson3(data) {
+// Parse YouTube srv3 format — extracts TRUE word-by-word timestamps
+// Format A (auto-generated): <p t="baseMs" d="durationMs"><s>word</s><s t="offsetMs">word2</s></p>
+// Format B (manual/fallback): <p t="baseMs" d="durationMs">phrase text</p>
+function parseSrv3(xmlContent) {
   const words = [];
   const segments = [];
   let fullText = '';
 
-  if (!data.events) {
-    return { text: '', words: [], segments: [], duration: 0 };
-  }
+  // Match all <p> elements with their attributes and content
+  const pRegex = /<p\s+([^>]*)>((?:.|\n)*?)<\/p>/g;
+  let pMatch;
 
-  for (const event of data.events) {
-    if (!event.segs) continue;
+  while ((pMatch = pRegex.exec(xmlContent)) !== null) {
+    const attrs = pMatch[1];
+    const content = pMatch[2];
 
-    const eventStart = (event.tStartMs || 0) / 1000;
-    let segText = '';
-    
-    for (const seg of event.segs) {
-      const text = seg.utf8?.trim();
-      if (!text || text === '\n') continue;
+    // Get base time and duration from <p> attributes
+    const tMatch = attrs.match(/\bt="(\d+)"/);
+    const dMatch = attrs.match(/\bd="(\d+)"/);
+    if (!tMatch) continue;
 
-      const wordStart = eventStart + (seg.tOffsetMs || 0) / 1000;
-      // Estimate word end: use next segment offset or a default duration
-      const wordDuration = 0.3; // Default 300ms per word
-      const wordEnd = wordStart + wordDuration;
+    const baseTimeMs = parseInt(tMatch[1]);
+    const durationMs = dMatch ? parseInt(dMatch[1]) : 3000;
 
-      words.push({
-        text: text,
-        start: Math.round(wordStart * 100) / 100,
-        end: Math.round(wordEnd * 100) / 100,
-      });
+    // Skip empty <p> elements
+    const trimmed = content.replace(/\n/g, ' ').trim();
+    if (!trimmed) continue;
 
-      segText += text + ' ';
-      fullText += text + ' ';
+    // Check if this <p> has <s> tags (word-level timing)
+    const hasSwordTags = /<s[\s>]/.test(content);
+    const lineWords = [];
+
+    if (hasSwordTags) {
+      // Format A: extract individual <s> word elements
+      const sRegex = /<s(?:\s+t="(\d+)")?>([^<]*)<\/s>/g;
+      let sMatch;
+      while ((sMatch = sRegex.exec(content)) !== null) {
+        const offsetMs = sMatch[1] ? parseInt(sMatch[1]) : 0;
+        let text = sMatch[2].trim();
+        text = decodeEntities(text);
+        if (!text) continue;
+
+        const wordStartMs = baseTimeMs + offsetMs;
+        lineWords.push({
+          text,
+          start: Math.round(wordStartMs / 10) / 100,
+          end: 0,
+        });
+      }
+    } else {
+      // Format B: split plain text into words with estimated timing
+      let text = trimmed;
+      text = decodeEntities(text);
+      const wordList = text.split(/\s+/).filter(w => w.length > 0);
+      const wordDur = durationMs / Math.max(wordList.length, 1);
+      for (let j = 0; j < wordList.length; j++) {
+        const wordStartMs = baseTimeMs + j * wordDur;
+        lineWords.push({
+          text: wordList[j],
+          start: Math.round(wordStartMs / 10) / 100,
+          end: 0,
+        });
+      }
     }
 
-    if (segText.trim()) {
-      const segEnd = eventStart + (event.dDurationMs || 3000) / 1000;
+    // Set word end times
+    for (let i = 0; i < lineWords.length; i++) {
+      if (i < lineWords.length - 1) {
+        lineWords[i].end = lineWords[i + 1].start;
+      } else {
+        lineWords[i].end = Math.round((baseTimeMs + durationMs) / 10) / 100;
+      }
+    }
+
+    if (lineWords.length > 0) {
+      words.push(...lineWords);
+      const segText = lineWords.map(w => w.text).join(' ');
+      fullText += segText + ' ';
       segments.push({
-        text: segText.trim(),
-        start: eventStart,
-        end: segEnd,
+        text: segText,
+        start: lineWords[0].start,
+        end: lineWords[lineWords.length - 1].end,
       });
     }
   }
 
-  // Fix word end times: each word ends when the next begins
+  // Fix word end times across segments
   for (let i = 0; i < words.length - 1; i++) {
-    if (words[i + 1].start > words[i].start) {
+    if (words[i + 1].start > words[i].start && words[i + 1].start < words[i].end + 2) {
       words[i].end = words[i + 1].start;
     }
   }
 
   const duration = words.length > 0 ? words[words.length - 1].end : 0;
+  return { text: fullText.trim(), words, segments, duration };
+}
 
-  return {
-    text: fullText.trim(),
-    words,
-    segments,
-    duration,
-  };
+function decodeEntities(text) {
+  return text.replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+}
+
+// Fallback: Parse json3 format
+function parseJson3(data) {
+  const words = [];
+  const segments = [];
+  let fullText = '';
+
+  if (!data.events) return { text: '', words: [], segments: [], duration: 0 };
+
+  for (const event of data.events) {
+    if (!event.segs) continue;
+    const eventStart = (event.tStartMs || 0) / 1000;
+    let segText = '';
+    for (const seg of event.segs) {
+      const text = seg.utf8?.trim();
+      if (!text || text === '\n') continue;
+      // Split multi-word segments into individual words
+      const segWords = text.split(/\s+/).filter(w => w.length > 0);
+      const segStartSec = eventStart + (seg.tOffsetMs || 0) / 1000;
+      const wordDur = 0.3;
+      segWords.forEach((w, j) => {
+        words.push({
+          text: w,
+          start: Math.round((segStartSec + j * wordDur) * 100) / 100,
+          end: Math.round((segStartSec + (j + 1) * wordDur) * 100) / 100,
+        });
+      });
+      segText += text + ' ';
+      fullText += text + ' ';
+    }
+    if (segText.trim()) {
+      const segEnd = eventStart + (event.dDurationMs || 3000) / 1000;
+      segments.push({ text: segText.trim(), start: eventStart, end: segEnd });
+    }
+  }
+
+  for (let i = 0; i < words.length - 1; i++) {
+    if (words[i + 1].start > words[i].start) words[i].end = words[i + 1].start;
+  }
+
+  const duration = words.length > 0 ? words[words.length - 1].end : 0;
+  return { text: fullText.trim(), words, segments, duration };
 }
 
 // Parse VTT subtitle format as fallback
