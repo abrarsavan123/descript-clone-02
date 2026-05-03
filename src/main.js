@@ -276,6 +276,7 @@ function renderEditor() {
           <div class="transcript-header">
             <span>Transcript</span>
             <div class="transcript-tools">
+              <button id="follow-btn" class="follow-btn">Follow ▸</button>
               <button id="copy-transcript-btn">📋 Copy</button>
               <button id="select-all-btn">Select All</button>
             </div>
@@ -336,7 +337,7 @@ function initEditor() {
   // Track previous active word index to avoid redundant DOM thrashing
   let prevActiveIdx = -1;
   let rafId = null;
-  let userClickedWord = false; // Suppress auto-scroll when user clicks a word
+  let followPlayback = false; // Descript-style: off by default, user can toggle
 
   // Render transcript
   renderTranscript();
@@ -415,9 +416,7 @@ function initEditor() {
       state.selectionStart = idx;
       state.selectionEnd = idx;
       // Seek video to word start — pin-point, no lag
-      userClickedWord = true;
       seekTo(state.transcript.words[idx].start);
-      setTimeout(() => { userClickedWord = false; }, 500);
     }
     updateSelectionUI();
   });
@@ -457,6 +456,14 @@ function initEditor() {
     updateSelectionUI();
   };
   document.getElementById('copy-transcript-btn').onclick = copyTranscript;
+  document.getElementById('follow-btn').onclick = () => {
+    followPlayback = !followPlayback;
+    const btn = document.getElementById('follow-btn');
+    btn.classList.toggle('active', followPlayback);
+    btn.textContent = followPlayback ? 'Follow ◼' : 'Follow ▸';
+    if (followPlayback) showToast('Auto-follow ON');
+    else showToast('Auto-follow OFF');
+  };
   document.getElementById('zoom-in').onclick = () => { state.zoom = Math.min(state.zoom * 1.5, 10); renderTimeline(); };
   document.getElementById('zoom-out').onclick = () => { state.zoom = Math.max(state.zoom / 1.5, 0.3); renderTimeline(); };
 
@@ -645,8 +652,8 @@ function initEditor() {
       const el = transcriptEl.querySelector(`.word[data-idx="${idx}"]`);
       if (el) {
         el.classList.add('active');
-        // Auto scroll — only during playback, not when user clicked a word
-        if (!userClickedWord) {
+        // Only auto-scroll if user explicitly enabled Follow mode
+        if (followPlayback && state.isPlaying) {
           const top = el.offsetTop;
           if (top > transcriptEl.scrollTop + transcriptEl.clientHeight - 60 || top < transcriptEl.scrollTop) {
             transcriptEl.scrollTo({ top: top - transcriptEl.clientHeight / 3, behavior: 'smooth' });
