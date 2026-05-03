@@ -526,6 +526,14 @@ input { font-family: var(--font); }
   color: var(--danger);
   opacity: 0.4;
   background: var(--danger-glow);
+  cursor: pointer;
+}
+
+.word.deleted:hover {
+  opacity: 0.7;
+  text-decoration: line-through wavy;
+  background: rgba(81, 207, 102, 0.15);
+  color: var(--success);
 }
 
 /* Scene alternating highlight colors */

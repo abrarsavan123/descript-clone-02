@@ -10,7 +10,6 @@ const state = {
   transcript: null,   // { text, words: [{text,start,end}], segments }
   sceneCuts: [],       // [0, 18.7, 24.4, ...] timestamps of visual cuts
   cuts: [],            // [{start, end}] deleted time ranges
-  undoStack: [],
   selectionStart: -1,
   selectionEnd: -1,
   isPlaying: false,
@@ -217,14 +216,15 @@ function renderEditor() {
           <input type="text" class="project-title" id="project-title" value="${escHtml(state.title)}" />
         </div>
         <div class="header-actions">
-          <button class="btn-secondary" id="undo-btn">↩ Undo</button>
+          <button class="btn-secondary" id="restore-all-btn">↩ Restore All</button>
           <button class="btn-secondary" id="new-btn">+ New</button>
           <button class="btn-primary" id="export-btn">Export Video</button>
         </div>
       </div>
       <div class="selection-bar" id="selection-bar">
         <span id="selection-info"></span>
-        <button id="delete-selection-btn">🗑 Delete Selection</button>
+        <button id="delete-selection-btn">🗑 Delete</button>
+        <button id="restore-selection-btn" style="display:none">↩ Restore</button>
         <button id="clear-selection-btn">✕ Clear</button>
       </div>
       <div class="workspace">
@@ -284,7 +284,7 @@ function renderEditor() {
       </div>
     </div>
     <div class="shortcuts-hint">
-      <kbd>Space</kbd> Play/Pause &nbsp; <kbd>Del</kbd> Delete selection &nbsp; <kbd>Ctrl+Z</kbd> Undo
+      <kbd>Space</kbd> Play/Pause &nbsp; <kbd>Del</kbd> Delete &nbsp; <kbd>R</kbd> Restore &nbsp; <kbd>Esc</kbd> Clear selection
     </div>
     <div class="toast" id="toast"></div>`;
 
@@ -338,6 +338,13 @@ function initEditor() {
     const wordEl = e.target.closest('.word');
     if (!wordEl) return;
     const idx = parseInt(wordEl.dataset.idx);
+
+    // If clicking a deleted word (without shift), restore it immediately
+    if (isWordDeleted(idx) && !e.shiftKey) {
+      restoreWord(idx);
+      return;
+    }
+
     if (e.shiftKey && state.selectionStart >= 0) {
       state.selectionEnd = idx;
       if (state.selectionEnd < state.selectionStart) {
@@ -360,7 +367,7 @@ function initEditor() {
       e.preventDefault();
       deleteSelection();
     }
-    if (e.ctrlKey && e.key === 'z') { e.preventDefault(); undo(); }
+    if (e.key === 'r' && state.selectionStart >= 0) { e.preventDefault(); restoreSelection(); }
     if (e.key === 'Escape') { clearSelection(); }
     // J/K/L seek
     if (e.key === 'j') video.currentTime = Math.max(0, video.currentTime - 5);
@@ -369,14 +376,15 @@ function initEditor() {
 
   // ── Buttons ──
   document.getElementById('delete-selection-btn').onclick = deleteSelection;
+  document.getElementById('restore-selection-btn').onclick = restoreSelection;
   document.getElementById('clear-selection-btn').onclick = clearSelection;
-  document.getElementById('undo-btn').onclick = undo;
+  document.getElementById('restore-all-btn').onclick = restoreAll;
   document.getElementById('export-btn').onclick = handleExport;
   document.getElementById('close-modal').onclick = () => {
     document.getElementById('export-modal').classList.remove('visible');
   };
   document.getElementById('new-btn').onclick = () => {
-    state.videoId = null; state.transcript = null; state.cuts = []; state.undoStack = [];
+    state.videoId = null; state.transcript = null; state.cuts = [];
     renderImportScreen();
   };
   document.getElementById('select-all-btn').onclick = () => {
@@ -507,9 +515,19 @@ function initEditor() {
     renderTranscript();
     const bar = document.getElementById('selection-bar');
     const info = document.getElementById('selection-info');
+    const deleteBtn = document.getElementById('delete-selection-btn');
+    const restoreBtn = document.getElementById('restore-selection-btn');
     if (state.selectionStart >= 0 && state.selectionEnd >= 0) {
       const count = state.selectionEnd - state.selectionStart + 1;
+      // Check if any selected words are deleted (to show restore) or active (to show delete)
+      let hasDeleted = false, hasActive = false;
+      for (let i = state.selectionStart; i <= state.selectionEnd; i++) {
+        if (isWordDeleted(i)) hasDeleted = true;
+        else hasActive = true;
+      }
       info.textContent = `${count} word${count > 1 ? 's' : ''} selected`;
+      deleteBtn.style.display = hasActive ? '' : 'none';
+      restoreBtn.style.display = hasDeleted ? '' : 'none';
       bar.classList.add('visible');
     } else {
       bar.classList.remove('visible');
@@ -519,29 +537,64 @@ function initEditor() {
   function deleteSelection() {
     if (state.selectionStart < 0) return;
     const words = state.transcript.words;
-    // Save undo state
-    state.undoStack.push([...state.cuts]);
-    // Add cuts for selected words
+    let count = 0;
     for (let i = state.selectionStart; i <= state.selectionEnd; i++) {
       if (!isWordDeleted(i)) {
         state.cuts.push({ start: words[i].start, end: words[i].end });
+        count++;
       }
     }
-    // Merge overlapping cuts
     mergeCuts();
     clearSelection();
     renderTranscript();
     renderTimeline();
-    showToast(`Deleted ${state.selectionEnd - state.selectionStart + 1} words`);
+    if (count > 0) showToast(`Deleted ${count} word${count > 1 ? 's' : ''}`);
   }
 
-  function undo() {
-    if (state.undoStack.length === 0) return;
-    state.cuts = state.undoStack.pop();
+  function restoreWord(idx) {
+    const w = state.transcript.words[idx];
+    // Remove any cut that contains this word
+    state.cuts = state.cuts.filter(c => !(w.start >= c.start && w.end <= c.end));
+    // If the word was inside a larger cut, we need to split it
+    const newCuts = [];
+    for (const c of state.cuts) {
+      if (w.start > c.start && w.end < c.end) {
+        // Word is in the middle of a cut — split into two
+        newCuts.push({ start: c.start, end: w.start });
+        newCuts.push({ start: w.end, end: c.end });
+      } else {
+        newCuts.push(c);
+      }
+    }
+    state.cuts = newCuts;
+    renderTranscript();
+    renderTimeline();
+    showToast(`Restored "${w.text}"`);
+  }
+
+  function restoreSelection() {
+    if (state.selectionStart < 0) return;
+    let count = 0;
+    for (let i = state.selectionStart; i <= state.selectionEnd; i++) {
+      if (isWordDeleted(i)) {
+        const w = state.transcript.words[i];
+        state.cuts = state.cuts.filter(c => !(w.start >= c.start && w.end <= c.end));
+        count++;
+      }
+    }
     clearSelection();
     renderTranscript();
     renderTimeline();
-    showToast('Undo');
+    if (count > 0) showToast(`Restored ${count} word${count > 1 ? 's' : ''}`);
+  }
+
+  function restoreAll() {
+    if (state.cuts.length === 0) return;
+    state.cuts = [];
+    clearSelection();
+    renderTranscript();
+    renderTimeline();
+    showToast('All words restored');
   }
 
   function clearSelection() {
