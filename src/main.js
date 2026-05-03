@@ -8,6 +8,7 @@ const state = {
   duration: 0,
   url: '',
   transcript: null,   // { text, words: [{text,start,end}], segments }
+  sceneCuts: [],       // [0, 18.7, 24.4, ...] timestamps of visual cuts
   cuts: [],            // [{start, end}] deleted time ranges
   undoStack: [],
   selectionStart: -1,
@@ -36,6 +37,8 @@ function renderImportScreen() {
           <div class="progress-bar-track"><div class="progress-bar-fill" id="dl-progress"></div></div>
           <div class="progress-step" id="step-transcribe"><span class="step-icon">2</span> Transcribing audio...</div>
           <div class="progress-bar-track"><div class="progress-bar-fill" id="tr-progress"></div></div>
+          <div class="progress-step" id="step-scenes"><span class="step-icon">3</span> Detecting scene cuts...</div>
+          <div class="progress-bar-track"><div class="progress-bar-fill" id="sc-progress"></div></div>
         </div>
         <div class="import-error" id="import-error"></div>
       </div>
@@ -142,6 +145,29 @@ async function handleImport() {
     state.transcript = await trResp.json();
     stepTr.classList.remove('active');
     stepTr.classList.add('done');
+
+    // Step 3: Detect scene cuts
+    const stepSc = document.getElementById('step-scenes');
+    const scBar = document.getElementById('sc-progress');
+    stepSc.classList.add('active');
+    scBar.style.width = '50%';
+
+    try {
+      const scResp = await fetch('/api/scene-cuts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoId: state.videoId }),
+      });
+      if (scResp.ok) {
+        const scData = await scResp.json();
+        state.sceneCuts = scData.cuts || [];
+      }
+    } catch (e) {
+      console.warn('Scene detection failed, continuing without:', e);
+    }
+    scBar.style.width = '100%';
+    stepSc.classList.remove('active');
+    stepSc.classList.add('done');
 
     // Transition to editor
     setTimeout(() => renderEditor(), 400);
@@ -362,6 +388,17 @@ function initEditor() {
   document.getElementById('zoom-out').onclick = () => { state.zoom = Math.max(state.zoom / 1.5, 0.3); renderTimeline(); };
 
   // ── Render helpers ──
+  // Determine which scene a word belongs to (returns scene index for alternating colors)
+  function getSceneIndex(wordStart) {
+    if (!state.sceneCuts || state.sceneCuts.length <= 1) return 0;
+    let sceneIdx = 0;
+    for (let i = 1; i < state.sceneCuts.length; i++) {
+      if (wordStart >= state.sceneCuts[i]) sceneIdx = i;
+      else break;
+    }
+    return sceneIdx;
+  }
+
   function renderTranscript() {
     const words = state.transcript.words;
     let html = '';
@@ -380,7 +417,10 @@ function initEditor() {
 
       const isDeleted = isWordDeleted(i);
       const isSelected = i >= state.selectionStart && i <= state.selectionEnd && state.selectionStart >= 0;
-      let cls = 'word';
+      const sceneIdx = getSceneIndex(w.start);
+      const sceneClass = sceneIdx % 2 === 0 ? 'scene-a' : 'scene-b';
+
+      let cls = `word ${sceneClass}`;
       if (isDeleted) cls += ' deleted';
       if (isSelected) cls += ' selected';
 

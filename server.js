@@ -231,6 +231,58 @@ app.post('/api/transcribe', async (req, res) => {
   }
 });
 
+// ─── POST /api/scene-cuts ─────────────────────────────────────────
+// Detect visual scene changes in the video using ffmpeg
+
+app.post('/api/scene-cuts', async (req, res) => {
+  const { videoId } = req.body;
+  if (!videoId) return res.status(400).json({ error: 'videoId is required' });
+
+  const videoPath = path.join(MEDIA_DIR, `${videoId}.mp4`);
+  const cachePath = path.join(MEDIA_DIR, `${videoId}_scenes.json`);
+
+  if (!fs.existsSync(videoPath)) {
+    return res.status(404).json({ error: 'Video not found' });
+  }
+
+  // Return cached result
+  if (fs.existsSync(cachePath)) {
+    return res.json(JSON.parse(fs.readFileSync(cachePath, 'utf-8')));
+  }
+
+  try {
+    console.log('Detecting scene cuts...');
+
+    // Use ffmpeg scene detection filter (threshold 0.3 = moderate sensitivity)
+    const { stderr } = await execFileAsync(FFMPEG_PATH, [
+      '-i', videoPath,
+      '-filter:v', "select='gt(scene,0.3)',showinfo",
+      '-f', 'null', '-',
+    ], { maxBuffer: 50 * 1024 * 1024 }).catch(e => ({ stderr: e.stderr || '' }));
+
+    // Parse pts_time values from showinfo output
+    const cuts = [0]; // Always start with time 0
+    const regex = /pts_time:([\d.]+)/g;
+    let match;
+    while ((match = regex.exec(stderr)) !== null) {
+      const time = parseFloat(match[1]);
+      // Only add if it's at least 1 second from the last cut (filter noise)
+      if (time - cuts[cuts.length - 1] > 1) {
+        cuts.push(Math.round(time * 100) / 100);
+      }
+    }
+
+    const result = { cuts, count: cuts.length };
+    fs.writeFileSync(cachePath, JSON.stringify(result, null, 2));
+    console.log(`Scene detection complete: ${cuts.length} cuts found`);
+
+    res.json(result);
+  } catch (err) {
+    console.error('Scene detection error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Parse YouTube srv3 format — extracts TRUE word-by-word timestamps
 // Format A (auto-generated): <p t="baseMs" d="durationMs"><s>word</s><s t="offsetMs">word2</s></p>
 // Format B (manual/fallback): <p t="baseMs" d="durationMs">phrase text</p>

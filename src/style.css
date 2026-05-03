@@ -528,6 +528,27 @@ input { font-family: var(--font); }
   background: var(--danger-glow);
 }
 
+/* Scene alternating highlight colors */
+.word.scene-a {
+  background: rgba(0, 184, 148, 0.12);
+  border-bottom: 2px solid rgba(0, 184, 148, 0.25);
+}
+
+.word.scene-b {
+  background: rgba(253, 203, 110, 0.12);
+  border-bottom: 2px solid rgba(253, 203, 110, 0.25);
+}
+
+.word.scene-a:hover { background: rgba(0, 184, 148, 0.25); }
+.word.scene-b:hover { background: rgba(253, 203, 110, 0.25); }
+
+.word.scene-a.active { background: rgba(0, 184, 148, 0.5); color: white; }
+.word.scene-b.active { background: rgba(253, 203, 110, 0.5); color: #1a1e28; }
+
+/* Selected and deleted override scene colors */
+.word.selected { background: rgba(108, 92, 231, 0.3); outline: 1px solid var(--accent); }
+.word.deleted { background: var(--danger-glow); }
+
 /* ─── Timeline ──────────────────────────────────────────── */
 .timeline {
   flex-shrink: 0;
