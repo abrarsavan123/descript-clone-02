@@ -9,6 +9,7 @@ const state = {
   url: '',
   transcript: null,   // { text, words: [{text,start,end}], segments }
   sceneCuts: [],       // [0, 18.7, 24.4, ...] timestamps of visual cuts
+  waveformData: null,  // { peaks: [0-1], duration, sampleRate }
   cuts: [],            // [{start, end}] deleted time ranges
   selectionStart: -1,
   selectionEnd: -1,
@@ -38,6 +39,8 @@ function renderImportScreen() {
           <div class="progress-bar-track"><div class="progress-bar-fill" id="tr-progress"></div></div>
           <div class="progress-step" id="step-scenes"><span class="step-icon">3</span> Detecting scene cuts...</div>
           <div class="progress-bar-track"><div class="progress-bar-fill" id="sc-progress"></div></div>
+          <div class="progress-step" id="step-waveform"><span class="step-icon">4</span> Extracting waveform...</div>
+          <div class="progress-bar-track"><div class="progress-bar-fill" id="wf-progress"></div></div>
         </div>
         <div class="import-error" id="import-error"></div>
       </div>
@@ -168,6 +171,28 @@ async function handleImport() {
     stepSc.classList.remove('active');
     stepSc.classList.add('done');
 
+    // Step 4: Extract waveform
+    const stepWf = document.getElementById('step-waveform');
+    const wfBar = document.getElementById('wf-progress');
+    stepWf.classList.add('active');
+    wfBar.style.width = '50%';
+
+    try {
+      const wfResp = await fetch('/api/waveform', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoId: state.videoId }),
+      });
+      if (wfResp.ok) {
+        state.waveformData = await wfResp.json();
+      }
+    } catch (e) {
+      console.warn('Waveform extraction failed, continuing without:', e);
+    }
+    wfBar.style.width = '100%';
+    stepWf.classList.remove('active');
+    stepWf.classList.add('done');
+
     // Transition to editor
     setTimeout(() => renderEditor(), 400);
   } catch (err) {
@@ -251,6 +276,7 @@ function renderEditor() {
           <div class="transcript-header">
             <span>Transcript</span>
             <div class="transcript-tools">
+              <button id="copy-transcript-btn">📋 Copy</button>
               <button id="select-all-btn">Select All</button>
             </div>
           </div>
@@ -267,7 +293,9 @@ function renderEditor() {
         </div>
         <div class="timeline-body" id="timeline-body">
           <div class="time-ruler" id="time-ruler"></div>
-          <div class="timeline-track" id="timeline-track"></div>
+          <div class="timeline-track" id="timeline-track">
+            <canvas id="waveform-canvas" class="waveform-canvas"></canvas>
+          </div>
           <div class="playhead" id="playhead"></div>
         </div>
       </div>
@@ -284,7 +312,7 @@ function renderEditor() {
       </div>
     </div>
     <div class="shortcuts-hint">
-      <kbd>Space</kbd> Play/Pause &nbsp; <kbd>Del</kbd> Delete &nbsp; <kbd>R</kbd> Restore &nbsp; <kbd>Esc</kbd> Clear selection
+      <kbd>Space</kbd> Play/Pause &nbsp; <kbd>Del</kbd> Delete &nbsp; <kbd>R</kbd> Restore &nbsp; <kbd>Esc</kbd> Clear &nbsp; <kbd>C</kbd> Copy
     </div>
     <div class="toast" id="toast"></div>`;
 
@@ -308,6 +336,7 @@ function initEditor() {
   // Track previous active word index to avoid redundant DOM thrashing
   let prevActiveIdx = -1;
   let rafId = null;
+  let userClickedWord = false; // Suppress auto-scroll when user clicks a word
 
   // Render transcript
   renderTranscript();
@@ -386,7 +415,9 @@ function initEditor() {
       state.selectionStart = idx;
       state.selectionEnd = idx;
       // Seek video to word start — pin-point, no lag
+      userClickedWord = true;
       seekTo(state.transcript.words[idx].start);
+      setTimeout(() => { userClickedWord = false; }, 500);
     }
     updateSelectionUI();
   });
@@ -400,6 +431,7 @@ function initEditor() {
       deleteSelection();
     }
     if (e.key === 'r' && state.selectionStart >= 0) { e.preventDefault(); restoreSelection(); }
+    if (e.key === 'c' && !e.ctrlKey && !e.metaKey) { copyTranscript(); }
     if (e.key === 'Escape') { clearSelection(); }
     // J/K/L seek
     if (e.key === 'j') video.currentTime = Math.max(0, video.currentTime - 5);
@@ -424,6 +456,7 @@ function initEditor() {
     state.selectionEnd = state.transcript.words.length - 1;
     updateSelectionUI();
   };
+  document.getElementById('copy-transcript-btn').onclick = copyTranscript;
   document.getElementById('zoom-in').onclick = () => { state.zoom = Math.min(state.zoom * 1.5, 10); renderTimeline(); };
   document.getElementById('zoom-out').onclick = () => { state.zoom = Math.max(state.zoom / 1.5, 0.3); renderTimeline(); };
 
@@ -477,6 +510,7 @@ function initEditor() {
     const track = document.getElementById('timeline-track');
     const ruler = document.getElementById('time-ruler');
     const body = document.getElementById('timeline-body');
+    const canvas = document.getElementById('waveform-canvas');
 
     track.style.width = totalWidth + 'px';
     ruler.style.width = totalWidth + 'px';
@@ -490,15 +524,94 @@ function initEditor() {
     }
     ruler.innerHTML = rulerHtml;
 
-    // Word clips
-    let trackHtml = '';
-    state.transcript.words.forEach((w, i) => {
-      const left = w.start * pxPerSec;
-      const width = Math.max((w.end - w.start) * pxPerSec, 2);
-      const del = isWordDeleted(i) ? ' deleted' : '';
-      trackHtml += `<div class="timeline-clip${del}" style="left:${left}px;width:${width}px" title="${escHtml(w.text)}">${width > 20 ? escHtml(w.text) : ''}</div>`;
-    });
-    track.innerHTML = trackHtml;
+    // ── Waveform canvas ──
+    const trackHeight = track.clientHeight || 70;
+    canvas.width = totalWidth;
+    canvas.height = trackHeight;
+    canvas.style.width = totalWidth + 'px';
+    canvas.style.height = trackHeight + 'px';
+
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (state.waveformData && state.waveformData.peaks.length > 0) {
+      const peaks = state.waveformData.peaks;
+      const wfDuration = state.waveformData.duration;
+      const peaksPerSec = state.waveformData.sampleRate; // 100 peaks/sec
+      const midY = trackHeight / 2;
+
+      // Draw waveform peaks
+      for (let px = 0; px < totalWidth; px++) {
+        const timeSec = px / pxPerSec;
+        const peakIdx = Math.floor(timeSec * peaksPerSec);
+        if (peakIdx >= peaks.length) break;
+
+        const amplitude = peaks[peakIdx];
+        const barH = Math.max(amplitude * midY * 0.9, 0.5);
+
+        // Check if this pixel falls within a deleted cut
+        const isInCut = state.cuts.some(c => timeSec >= c.start && timeSec < c.end);
+
+        if (isInCut) {
+          ctx.fillStyle = 'rgba(255, 107, 107, 0.25)';
+        } else {
+          // Gradient color based on amplitude
+          const alpha = 0.3 + amplitude * 0.5;
+          ctx.fillStyle = `rgba(108, 92, 231, ${alpha})`;
+        }
+
+        ctx.fillRect(px, midY - barH, 1, barH * 2);
+      }
+
+      // Draw center line
+      ctx.strokeStyle = 'rgba(139, 146, 168, 0.15)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, midY);
+      ctx.lineTo(totalWidth, midY);
+      ctx.stroke();
+
+      // Overlay scene cut markers
+      if (state.sceneCuts.length > 1) {
+        ctx.strokeStyle = 'rgba(253, 203, 110, 0.5)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        for (let i = 1; i < state.sceneCuts.length; i++) {
+          const x = state.sceneCuts[i] * pxPerSec;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, trackHeight);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+      }
+
+      // Overlay word text labels (only when zoomed in enough)
+      if (pxPerSec > 12) {
+        ctx.font = '9px Inter, sans-serif';
+        ctx.fillStyle = 'rgba(232, 234, 240, 0.6)';
+        ctx.textBaseline = 'bottom';
+        state.transcript.words.forEach((w, i) => {
+          const x = w.start * pxPerSec;
+          const width = (w.end - w.start) * pxPerSec;
+          if (width > 18) {
+            const isDeleted = isWordDeleted(i);
+            ctx.fillStyle = isDeleted ? 'rgba(255, 107, 107, 0.35)' : 'rgba(232, 234, 240, 0.6)';
+            ctx.fillText(w.text, x + 2, trackHeight - 3, width - 4);
+          }
+        });
+      }
+    } else {
+      // Fallback: draw word clips like before (no waveform data)
+      let trackHtml = '';
+      state.transcript.words.forEach((w, i) => {
+        const left = w.start * pxPerSec;
+        const width = Math.max((w.end - w.start) * pxPerSec, 2);
+        const del = isWordDeleted(i) ? ' deleted' : '';
+        trackHtml += `<div class="timeline-clip${del}" style="left:${left}px;width:${width}px" title="${escHtml(w.text)}">${width > 20 ? escHtml(w.text) : ''}</div>`;
+      });
+      track.innerHTML = '<canvas id="waveform-canvas" class="waveform-canvas"></canvas>' + trackHtml;
+    }
   }
 
   // Binary search to find the active word index — O(log n) instead of O(n)
@@ -532,10 +645,12 @@ function initEditor() {
       const el = transcriptEl.querySelector(`.word[data-idx="${idx}"]`);
       if (el) {
         el.classList.add('active');
-        // Auto scroll — only when word is out of view
-        const top = el.offsetTop;
-        if (top > transcriptEl.scrollTop + transcriptEl.clientHeight - 60 || top < transcriptEl.scrollTop) {
-          transcriptEl.scrollTo({ top: top - transcriptEl.clientHeight / 3, behavior: 'smooth' });
+        // Auto scroll — only during playback, not when user clicked a word
+        if (!userClickedWord) {
+          const top = el.offsetTop;
+          if (top > transcriptEl.scrollTop + transcriptEl.clientHeight - 60 || top < transcriptEl.scrollTop) {
+            transcriptEl.scrollTo({ top: top - transcriptEl.clientHeight / 3, behavior: 'smooth' });
+          }
         }
       }
     }
@@ -566,7 +681,11 @@ function initEditor() {
   }
 
   function updateSelectionUI() {
+    // Preserve scroll position across re-render
+    const scrollTop = transcriptEl.scrollTop;
     renderTranscript();
+    transcriptEl.scrollTop = scrollTop;
+
     const bar = document.getElementById('selection-bar');
     const info = document.getElementById('selection-info');
     const deleteBtn = document.getElementById('delete-selection-btn');
@@ -600,7 +719,9 @@ function initEditor() {
     }
     mergeCuts();
     clearSelection();
+    const scrollTop = transcriptEl.scrollTop;
     renderTranscript();
+    transcriptEl.scrollTop = scrollTop;
     renderTimeline();
     if (count > 0) showToast(`Deleted ${count} word${count > 1 ? 's' : ''}`);
   }
@@ -620,7 +741,9 @@ function initEditor() {
       }
     }
     state.cuts = newCuts;
+    const scrollTop = transcriptEl.scrollTop;
     renderTranscript();
+    transcriptEl.scrollTop = scrollTop;
     renderTimeline();
     showToast(`Restored "${w.text}"`);
   }
@@ -645,7 +768,9 @@ function initEditor() {
       }
     }
     clearSelection();
+    const scrollTop = transcriptEl.scrollTop;
     renderTranscript();
+    transcriptEl.scrollTop = scrollTop;
     renderTimeline();
     if (count > 0) showToast(`Restored ${count} word${count > 1 ? 's' : ''}`);
   }
@@ -654,7 +779,9 @@ function initEditor() {
     if (state.cuts.length === 0) return;
     state.cuts = [];
     clearSelection();
+    const scrollTop = transcriptEl.scrollTop;
     renderTranscript();
+    transcriptEl.scrollTop = scrollTop;
     renderTimeline();
     showToast('All words restored');
   }
@@ -663,7 +790,20 @@ function initEditor() {
     state.selectionStart = -1;
     state.selectionEnd = -1;
     document.getElementById('selection-bar').classList.remove('visible');
+    const scrollTop = transcriptEl.scrollTop;
     renderTranscript();
+    transcriptEl.scrollTop = scrollTop;
+  }
+
+  // Copy transcript (non-deleted words) to clipboard
+  function copyTranscript() {
+    const words = state.transcript.words;
+    const text = words.filter((_, i) => !isWordDeleted(i)).map(w => w.text).join(' ');
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('Transcript copied to clipboard');
+    }).catch(() => {
+      showToast('Failed to copy — try again');
+    });
   }
 
   // Timeline body click to seek
