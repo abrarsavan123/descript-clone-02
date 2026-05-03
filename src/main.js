@@ -553,15 +553,14 @@ function initEditor() {
 
   function restoreWord(idx) {
     const w = state.transcript.words[idx];
-    // Remove any cut that contains this word
-    state.cuts = state.cuts.filter(c => !(w.start >= c.start && w.end <= c.end));
-    // If the word was inside a larger cut, we need to split it
+    // Find the cut containing this word and split it around the word
     const newCuts = [];
     for (const c of state.cuts) {
-      if (w.start > c.start && w.end < c.end) {
-        // Word is in the middle of a cut — split into two
-        newCuts.push({ start: c.start, end: w.start });
-        newCuts.push({ start: w.end, end: c.end });
+      if (w.start >= c.start && w.end <= c.end) {
+        // This cut contains the word — split into before/after pieces
+        if (c.start < w.start) newCuts.push({ start: c.start, end: w.start });
+        if (w.end < c.end) newCuts.push({ start: w.end, end: c.end });
+        // Word's range is excluded (restored)
       } else {
         newCuts.push(c);
       }
@@ -578,7 +577,16 @@ function initEditor() {
     for (let i = state.selectionStart; i <= state.selectionEnd; i++) {
       if (isWordDeleted(i)) {
         const w = state.transcript.words[i];
-        state.cuts = state.cuts.filter(c => !(w.start >= c.start && w.end <= c.end));
+        const newCuts = [];
+        for (const c of state.cuts) {
+          if (w.start >= c.start && w.end <= c.end) {
+            if (c.start < w.start) newCuts.push({ start: c.start, end: w.start });
+            if (w.end < c.end) newCuts.push({ start: w.end, end: c.end });
+          } else {
+            newCuts.push(c);
+          }
+        }
+        state.cuts = newCuts;
         count++;
       }
     }
