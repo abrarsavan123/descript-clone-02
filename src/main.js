@@ -305,13 +305,17 @@ function initEditor() {
   const selectionBar = document.getElementById('selection-bar');
   const selectionInfo = document.getElementById('selection-info');
 
+  // Track previous active word index to avoid redundant DOM thrashing
+  let prevActiveIdx = -1;
+  let rafId = null;
+
   // Render transcript
   renderTranscript();
   renderTimeline();
 
   // ── Video Controls ──
   playBtn.onclick = () => video.paused ? video.play() : video.pause();
-  video.onplay = () => { playIcon.style.display = 'none'; pauseIcon.style.display = 'block'; state.isPlaying = true; };
+  video.onplay = () => { playIcon.style.display = 'none'; pauseIcon.style.display = 'block'; state.isPlaying = true; startRAFLoop(); };
   video.onpause = () => { playIcon.style.display = 'block'; pauseIcon.style.display = 'none'; state.isPlaying = false; };
   volumeSlider.oninput = () => { video.volume = volumeSlider.value; };
 
@@ -319,11 +323,36 @@ function initEditor() {
   seekBar.onclick = (e) => {
     const rect = seekBar.getBoundingClientRect();
     const pct = (e.clientX - rect.left) / rect.width;
-    video.currentTime = pct * video.duration;
+    seekTo(pct * video.duration);
   };
 
-  // Time update loop
-  video.ontimeupdate = () => {
+  // Fast seek helper — uses fastSeek() when available for instant response
+  function seekTo(time) {
+    if (video.fastSeek) {
+      video.fastSeek(time);
+    } else {
+      video.currentTime = time;
+    }
+    // Immediate UI update (don't wait for next RAF tick)
+    updateUI();
+  }
+
+  // 60fps render loop — replaces the choppy ~4Hz ontimeupdate
+  function startRAFLoop() {
+    if (rafId) return;
+    function tick() {
+      updateUI();
+      rafId = requestAnimationFrame(tick);
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  // Also listen to timeupdate as fallback (fires during pause + seek)
+  video.ontimeupdate = () => updateUI();
+  // Listen for seeked to immediately snap UI
+  video.onseeked = () => updateUI();
+
+  function updateUI() {
     if (!video.duration) return;
     const pct = (video.currentTime / video.duration) * 100;
     seekFill.style.width = pct + '%';
@@ -331,7 +360,10 @@ function initEditor() {
     highlightActiveWord();
     updatePlayhead();
     enforceCuts();
-  };
+  }
+
+  // Start RAF loop on initial load if video is already playing
+  if (!video.paused) startRAFLoop();
 
   // ── Transcript word click / selection ──
   transcriptEl.addEventListener('click', (e) => {
@@ -353,8 +385,8 @@ function initEditor() {
     } else {
       state.selectionStart = idx;
       state.selectionEnd = idx;
-      // Seek video to word start
-      video.currentTime = state.transcript.words[idx].start;
+      // Seek video to word start — pin-point, no lag
+      seekTo(state.transcript.words[idx].start);
     }
     updateSelectionUI();
   });
@@ -469,24 +501,46 @@ function initEditor() {
     track.innerHTML = trackHtml;
   }
 
+  // Binary search to find the active word index — O(log n) instead of O(n)
+  function findActiveWordIndex(time) {
+    const words = state.transcript.words;
+    let lo = 0, hi = words.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (words[mid].end <= time) lo = mid + 1;
+      else if (words[mid].start > time) hi = mid - 1;
+      else return mid;
+    }
+    return -1;
+  }
+
   function highlightActiveWord() {
     const time = video.currentTime;
-    const words = transcriptEl.querySelectorAll('.word');
-    words.forEach(el => {
-      const start = parseFloat(el.dataset.start);
-      const end = parseFloat(el.dataset.end);
-      if (time >= start && time < end && !el.classList.contains('deleted')) {
+    const idx = findActiveWordIndex(time);
+
+    // Skip if same word as last frame (avoid DOM thrashing at 60fps)
+    if (idx === prevActiveIdx) return;
+
+    // Remove old highlight
+    if (prevActiveIdx >= 0) {
+      const oldEl = transcriptEl.querySelector(`.word[data-idx="${prevActiveIdx}"]`);
+      if (oldEl) oldEl.classList.remove('active');
+    }
+
+    // Add new highlight
+    if (idx >= 0 && !isWordDeleted(idx)) {
+      const el = transcriptEl.querySelector(`.word[data-idx="${idx}"]`);
+      if (el) {
         el.classList.add('active');
-        // Auto scroll
-        const container = transcriptEl;
+        // Auto scroll — only when word is out of view
         const top = el.offsetTop;
-        if (top > container.scrollTop + container.clientHeight - 60 || top < container.scrollTop) {
-          container.scrollTop = top - container.clientHeight / 3;
+        if (top > transcriptEl.scrollTop + transcriptEl.clientHeight - 60 || top < transcriptEl.scrollTop) {
+          transcriptEl.scrollTo({ top: top - transcriptEl.clientHeight / 3, behavior: 'smooth' });
         }
-      } else {
-        el.classList.remove('active');
       }
-    });
+    }
+
+    prevActiveIdx = idx;
   }
 
   function updatePlayhead() {

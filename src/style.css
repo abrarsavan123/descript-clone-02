@@ -384,7 +384,6 @@ input { font-family: var(--font); }
   border-radius: 3px;
   width: 0%;
   position: relative;
-  transition: width 0.1s linear;
 }
 
 .seek-bar-fill::after {
@@ -677,7 +676,6 @@ input { font-family: var(--font); }
   z-index: 10;
   left: 0;
   pointer-events: none;
-  transition: left 0.1s linear;
 }
 
 .playhead::before {
