@@ -162,8 +162,14 @@ app.post('/api/download', async (req, res) => {
 });
 
 // ─── POST /api/transcribe ─────────────────────────────────────────
-// Uses YouTube's free auto-generated captions via yt-dlp (no API key needed!)
-// Downloads srv3 format which has WORD-LEVEL timestamps
+// Downloads BOTH manual and auto-generated YouTube captions, picks the best one.
+// Manual subs = creator-uploaded (accurate text, no word-level timing)
+// Auto subs   = YouTube AI (word-level timing via <s> tags, but can be noisy)
+
+// Noise patterns to filter from transcripts (case-insensitive)
+const NOISE_PATTERNS = /^\[.*\]$|^>>$|^♪+$|^-+$/;
+function isNoise(text) { return NOISE_PATTERNS.test(text.trim()); }
+function countSpeechWords(words) { return words.filter(w => !isNoise(w.text)).length; }
 
 app.post('/api/transcribe', async (req, res) => {
   const { videoId, url } = req.body;
@@ -178,58 +184,154 @@ app.post('/api/transcribe', async (req, res) => {
   }
 
   try {
-    console.log('Downloading YouTube captions (srv3 for word-level timing)...');
-
     const subPath = path.join(MEDIA_DIR, videoId);
     const videoUrl = url || `https://www.youtube.com/watch?v=${videoId}`;
 
-    // Download srv3 format — auto-generated captions have word-by-word <s> tags
-    // Use --write-auto-sub ONLY (manual subs don't have word timing)
-    await execFileAsync(YTDLP_PATH, [
-      '--write-auto-sub',
-      '--sub-lang', 'en',
-      '--sub-format', 'srv3',
-      '--skip-download',
-      '--no-playlist',
-      '-o', subPath,
-      videoUrl,
-    ], { maxBuffer: 10 * 1024 * 1024 });
+    // ── Step 1: Download BOTH manual + auto-generated subs ──
+    // Manual subs (--write-sub) = what YouTube shows in its transcript panel
+    // Auto subs (--write-auto-sub) = YouTube's AI captions with word-level timing
+    console.log('Downloading YouTube captions (manual + auto-generated)...');
 
-    // Find the srv3 file
-    const files = fs.readdirSync(MEDIA_DIR);
-    let subFile = files.find(f => f.startsWith(videoId) && f.endsWith('.srv3'));
+    // Download auto-generated subs (srv3 for word-level timing)
+    let autoResult = null;
+    try {
+      await execFileAsync(YTDLP_PATH, [
+        '--write-auto-sub',
+        '--sub-lang', 'en',
+        '--sub-format', 'srv3',
+        '--skip-download',
+        '--no-playlist',
+        '-o', subPath + '_auto',
+        videoUrl,
+      ], { maxBuffer: 10 * 1024 * 1024 });
 
-    if (subFile) {
-      const srv3Content = fs.readFileSync(path.join(MEDIA_DIR, subFile), 'utf-8');
-      const result = parseSrv3(srv3Content);
-      fs.writeFileSync(transcriptPath, JSON.stringify(result, null, 2));
-      console.log(`Transcription complete (srv3): ${result.words.length} words`);
-      return res.json(result);
+      const files = fs.readdirSync(MEDIA_DIR);
+      const autoFile = files.find(f => f.startsWith(videoId + '_auto') && f.endsWith('.srv3'));
+      if (autoFile) {
+        const srv3Content = fs.readFileSync(path.join(MEDIA_DIR, autoFile), 'utf-8');
+        autoResult = parseSrv3(srv3Content);
+        console.log(`  Auto-generated: ${autoResult.words.length} total, ${countSpeechWords(autoResult.words)} speech words`);
+      }
+    } catch (e) {
+      console.log('  Auto-generated subs not available:', e.message?.substring(0, 100));
     }
 
-    // Fallback: try json3
-    console.log('srv3 not found, trying json3...');
-    await execFileAsync(YTDLP_PATH, [
-      '--write-auto-sub', '--write-sub', '--sub-lang', 'en',
-      '--sub-format', 'json3', '--skip-download', '--no-playlist',
-      '-o', subPath, videoUrl,
-    ], { maxBuffer: 10 * 1024 * 1024 });
+    // Download manual subs (srv3 or vtt)
+    let manualResult = null;
+    try {
+      await execFileAsync(YTDLP_PATH, [
+        '--write-sub',
+        '--no-write-auto-sub',
+        '--sub-lang', 'en',
+        '--sub-format', 'srv3/vtt/srt',
+        '--skip-download',
+        '--no-playlist',
+        '-o', subPath + '_manual',
+        videoUrl,
+      ], { maxBuffer: 10 * 1024 * 1024 });
 
-    subFile = files.find(f => f.startsWith(videoId) && f.endsWith('.json3'));
-    if (subFile) {
-      const json3Data = JSON.parse(fs.readFileSync(path.join(MEDIA_DIR, subFile), 'utf-8'));
-      const result = parseJson3(json3Data);
-      fs.writeFileSync(transcriptPath, JSON.stringify(result, null, 2));
-      console.log(`Transcription complete (json3): ${result.words.length} words`);
-      return res.json(result);
+      const files = fs.readdirSync(MEDIA_DIR);
+      const manualSrv3 = files.find(f => f.startsWith(videoId + '_manual') && f.endsWith('.srv3'));
+      const manualVtt = files.find(f => f.startsWith(videoId + '_manual') && (f.endsWith('.vtt') || f.endsWith('.srt')));
+
+      if (manualSrv3) {
+        const srv3Content = fs.readFileSync(path.join(MEDIA_DIR, manualSrv3), 'utf-8');
+        manualResult = parseSrv3(srv3Content);
+        console.log(`  Manual (srv3): ${manualResult.words.length} total, ${countSpeechWords(manualResult.words)} speech words`);
+      } else if (manualVtt) {
+        const vttContent = fs.readFileSync(path.join(MEDIA_DIR, manualVtt), 'utf-8');
+        manualResult = parseVTT(vttContent);
+        console.log(`  Manual (vtt): ${manualResult.words.length} total, ${countSpeechWords(manualResult.words)} speech words`);
+      }
+    } catch (e) {
+      console.log('  Manual subs not available:', e.message?.substring(0, 100));
     }
 
-    return res.status(404).json({ error: 'No captions available for this video.' });
+    // ── Step 2: Pick the best transcript ──
+    // Prefer whichever has more actual speech words (not [music], etc.)
+    let result = null;
+    const autoSpeech = autoResult ? countSpeechWords(autoResult.words) : 0;
+    const manualSpeech = manualResult ? countSpeechWords(manualResult.words) : 0;
+
+    if (autoSpeech >= manualSpeech && autoResult) {
+      console.log(`  → Using auto-generated captions (${autoSpeech} speech words vs ${manualSpeech} manual)`);
+      result = autoResult;
+    } else if (manualResult) {
+      console.log(`  → Using manual captions (${manualSpeech} speech words vs ${autoSpeech} auto)`);
+      result = manualResult;
+    }
+
+    // Fallback: try json3 if neither worked well
+    if (!result || countSpeechWords(result.words) === 0) {
+      console.log('  Trying json3 fallback...');
+      try {
+        await execFileAsync(YTDLP_PATH, [
+          '--write-auto-sub', '--write-sub', '--sub-lang', 'en',
+          '--sub-format', 'json3', '--skip-download', '--no-playlist',
+          '-o', subPath, videoUrl,
+        ], { maxBuffer: 10 * 1024 * 1024 });
+
+        const files = fs.readdirSync(MEDIA_DIR);
+        const json3File = files.find(f => f.startsWith(videoId) && f.endsWith('.json3'));
+        if (json3File) {
+          const json3Data = JSON.parse(fs.readFileSync(path.join(MEDIA_DIR, json3File), 'utf-8'));
+          result = parseJson3(json3Data);
+          console.log(`  json3 fallback: ${result.words.length} words`);
+        }
+      } catch (e) {
+        console.log('  json3 fallback failed:', e.message?.substring(0, 100));
+      }
+    }
+
+    if (!result || result.words.length === 0) {
+      return res.status(404).json({ error: 'No captions available for this video.' });
+    }
+
+    // ── Step 3: Filter noise markers from the result ──
+    result = filterNoiseWords(result);
+
+    fs.writeFileSync(transcriptPath, JSON.stringify(result, null, 2));
+    console.log(`Transcription complete: ${result.words.length} words`);
+
+    // Clean up temp subtitle files
+    try {
+      const files = fs.readdirSync(MEDIA_DIR);
+      for (const f of files) {
+        if (f.startsWith(videoId) && (f.endsWith('.srv3') || f.endsWith('.vtt') || f.endsWith('.srt') || f.endsWith('.json3'))) {
+          fs.unlinkSync(path.join(MEDIA_DIR, f));
+        }
+      }
+    } catch {}
+
+    return res.json(result);
   } catch (err) {
     console.error('Transcription error:', err);
     res.status(500).json({ error: 'Failed to get captions: ' + err.message });
   }
 });
+
+// Filter out noise-only words like [music], [applause], >>, etc.
+function filterNoiseWords(result) {
+  const filteredWords = result.words.filter(w => !isNoise(w.text));
+  if (filteredWords.length === 0) return result; // Don't filter if it would remove everything
+  const filteredText = filteredWords.map(w => w.text).join(' ');
+  // Rebuild segments from filtered words
+  const segments = [];
+  let segWords = [];
+  for (let i = 0; i < filteredWords.length; i++) {
+    segWords.push(filteredWords[i]);
+    const gap = i < filteredWords.length - 1 ? filteredWords[i + 1].start - filteredWords[i].end : 999;
+    if (gap > 2 || i === filteredWords.length - 1) {
+      segments.push({
+        text: segWords.map(w => w.text).join(' '),
+        start: segWords[0].start,
+        end: segWords[segWords.length - 1].end,
+      });
+      segWords = [];
+    }
+  }
+  return { text: filteredText, words: filteredWords, segments, duration: result.duration };
+}
 
 // ─── POST /api/scene-cuts ─────────────────────────────────────────
 // Detect visual scene changes in the video using ffmpeg
