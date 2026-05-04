@@ -334,8 +334,8 @@ function filterNoiseWords(result) {
 }
 
 // ─── POST /api/scene-cuts ─────────────────────────────────────────
-// Detect visual scene changes using PySceneDetect (ContentDetector) for
-// pinpoint accuracy. Falls back to ffmpeg if PySceneDetect is not installed.
+// Detect visual scene changes using ffmpeg (fast) as primary method.
+// ffmpeg scene filter is hardware-accelerated and finishes in seconds.
 
 app.post('/api/scene-cuts', async (req, res) => {
   const { videoId } = req.body;
@@ -355,94 +355,17 @@ app.post('/api/scene-cuts', async (req, res) => {
 
   try {
     let cuts = [0]; // Always start with time 0
-    let method = 'unknown';
+    let method = 'ffmpeg';
 
-    // ── Try PySceneDetect first (much more accurate) ──
-    const pySceneDetectAvailable = (() => {
-      try { execSync('scenedetect version', { encoding: 'utf-8', stdio: 'pipe' }); return true; }
-      catch { return false; }
-    })();
+    // ── Primary: ffmpeg scene detection (fast, finishes in seconds) ──
+    console.log('Detecting scene cuts with ffmpeg...');
 
-    if (pySceneDetectAvailable) {
-      console.log('Detecting scene cuts with PySceneDetect (ContentDetector)...');
-      method = 'pyscenedetect';
-
-      try {
-        // PySceneDetect with ContentDetector — uses HSV color analysis for accurate cuts
-        // threshold=27 is default; lower = more sensitive
-        const csvPath = path.join(MEDIA_DIR, `${videoId}_scenes_temp.csv`);
-        const { stdout, stderr } = await execFileAsync('scenedetect', [
-          '-i', videoPath,
-          '--output', MEDIA_DIR,
-          'detect-content',
-          '-t', '27',
-          'list-scenes',
-          '-f', csvPath,
-          '-q',
-        ], { maxBuffer: 50 * 1024 * 1024, timeout: 300000 });
-
-        // Parse CSV output — columns: Scene Number, Start Frame, Start Timecode, Start Time (seconds), ...
-        if (fs.existsSync(csvPath)) {
-          const csvContent = fs.readFileSync(csvPath, 'utf-8');
-          const lines = csvContent.split('\n');
-          // Skip header lines (first 2 rows are headers)
-          for (let i = 2; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue;
-            const cols = line.split(',');
-            // Column index 3 is "Start Time (seconds)" in standard PySceneDetect output
-            const timeStr = cols[3]?.trim();
-            if (timeStr) {
-              const time = parseFloat(timeStr);
-              if (!isNaN(time) && time > 0 && time - cuts[cuts.length - 1] > 0.3) {
-                cuts.push(Math.round(time * 100) / 100);
-              }
-            }
-          }
-          // Clean up temp CSV
-          try { fs.unlinkSync(csvPath); } catch {}
-        }
-
-        // Also try parsing stdout/stderr for timecodes if CSV didn't work
-        if (cuts.length <= 1) {
-          const output = (stdout || '') + (stderr || '');
-          // Match timecodes like "00:00:18.750"
-          const tcRegex = /(\d+:\d+:\d+\.\d+)/g;
-          let tcMatch;
-          const timecodes = [];
-          while ((tcMatch = tcRegex.exec(output)) !== null) {
-            const tc = tcMatch[1];
-            const parts = tc.split(':');
-            const secs = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
-            if (secs > 0 && !timecodes.includes(secs)) timecodes.push(secs);
-          }
-          // Take every other timecode (start of each scene)
-          for (let i = 0; i < timecodes.length; i += 2) {
-            const time = Math.round(timecodes[i] * 100) / 100;
-            if (time > 0 && time - cuts[cuts.length - 1] > 0.3) {
-              cuts.push(time);
-            }
-          }
-        }
-
-        console.log(`  PySceneDetect found ${cuts.length - 1} scene cuts`);
-      } catch (e) {
-        console.warn('  PySceneDetect failed, falling back to ffmpeg:', e.message?.substring(0, 200));
-        method = 'ffmpeg-fallback';
-        cuts = [0]; // Reset for fallback
-      }
-    }
-
-    // ── Fallback: ffmpeg scene detection ──
-    if (cuts.length <= 1 && method !== 'pyscenedetect') {
-      console.log('Detecting scene cuts with ffmpeg (fallback)...');
-      method = 'ffmpeg';
-
+    try {
       const { stderr } = await execFileAsync(FFMPEG_PATH, [
         '-i', videoPath,
         '-filter:v', "select='gt(scene,0.3)',showinfo",
         '-f', 'null', '-',
-      ], { maxBuffer: 50 * 1024 * 1024 }).catch(e => ({ stderr: e.stderr || '' }));
+      ], { maxBuffer: 50 * 1024 * 1024, timeout: 120000 }).catch(e => ({ stderr: e.stderr || '' }));
 
       const regex = /pts_time:([\d.]+)/g;
       let match;
@@ -452,27 +375,9 @@ app.post('/api/scene-cuts', async (req, res) => {
           cuts.push(Math.round(time * 100) / 100);
         }
       }
-    }
-
-    // Also run ffmpeg fallback if PySceneDetect produced no results
-    if (cuts.length <= 1) {
-      console.log('No cuts from PySceneDetect, trying ffmpeg fallback...');
-      method = 'ffmpeg-fallback';
-
-      const { stderr } = await execFileAsync(FFMPEG_PATH, [
-        '-i', videoPath,
-        '-filter:v', "select='gt(scene,0.3)',showinfo",
-        '-f', 'null', '-',
-      ], { maxBuffer: 50 * 1024 * 1024 }).catch(e => ({ stderr: e.stderr || '' }));
-
-      const regex = /pts_time:([\d.]+)/g;
-      let match;
-      while ((match = regex.exec(stderr)) !== null) {
-        const time = parseFloat(match[1]);
-        if (time - cuts[cuts.length - 1] > 1) {
-          cuts.push(Math.round(time * 100) / 100);
-        }
-      }
+      console.log(`  ffmpeg found ${cuts.length - 1} scene cuts`);
+    } catch (e) {
+      console.warn('  ffmpeg scene detection failed:', e.message?.substring(0, 200));
     }
 
     const result = { cuts, count: cuts.length, method };

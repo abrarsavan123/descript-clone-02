@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n server,vite -c blue,green \"node server.js\" \"vite --port 5174\"",
+    "dev": "concurrently -n server,vite -c blue,green \"node server/index.js\" \"vite --port 5174\"",
     "build": "vite build",
     "server": "node server.js",
     "preview": "vite preview"

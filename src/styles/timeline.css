@@ -1,0 +1,56 @@
+/* ─── Timeline ──────────────────────────────────────────── */
+.timeline { flex-shrink: 0; background: var(--bg-tertiary); border-top: 1px solid var(--border); height: 160px; display: flex; flex-direction: column; }
+
+.timeline-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 16px; font-size: 0.72rem; font-weight: 600;
+  color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+
+.timeline-zoom { display: flex; gap: 4px; }
+
+.timeline-zoom button {
+  width: 24px; height: 24px; border-radius: var(--radius-sm);
+  background: var(--bg-elevated); color: var(--text-secondary);
+  font-size: 0.85rem; display: flex; align-items: center; justify-content: center;
+  transition: all var(--transition);
+}
+
+.timeline-zoom button:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.timeline-body { flex: 1; overflow-x: auto; overflow-y: hidden; position: relative; padding: 8px 0; }
+
+/* Ruler */
+.time-ruler { height: 20px; position: relative; margin: 0 16px; }
+
+.time-ruler-mark { position: absolute; top: 0; font-size: 0.6rem; color: var(--text-muted); transform: translateX(-50%); }
+.time-ruler-mark::after { content: ''; position: absolute; left: 50%; top: 14px; width: 1px; height: 6px; background: var(--text-muted); opacity: 0.4; }
+
+/* Track */
+.timeline-track { height: 70px; position: relative; margin: 0 16px; background: var(--bg-elevated); border-radius: var(--radius-sm); overflow: hidden; }
+
+/* Waveform */
+.waveform-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+
+.timeline-clip {
+  position: absolute; top: 0; height: 100%;
+  background: linear-gradient(180deg, rgba(108, 92, 231, 0.4), rgba(108, 92, 231, 0.2));
+  border-left: 1px solid rgba(108, 92, 231, 0.3);
+  display: flex; align-items: center; padding: 0 4px;
+  font-size: 0.55rem; color: var(--text-secondary);
+  overflow: hidden; white-space: nowrap; transition: opacity var(--transition);
+}
+
+.timeline-clip.deleted {
+  background: linear-gradient(180deg, rgba(255, 107, 107, 0.3), rgba(255, 107, 107, 0.1));
+  border-left-color: rgba(255, 107, 107, 0.3); opacity: 0.3;
+}
+
+/* Playhead */
+.playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--danger); z-index: 10; left: 0; pointer-events: none; }
+.playhead::before {
+  content: ''; position: absolute; top: -2px; left: -5px;
+  width: 12px; height: 12px; background: var(--danger);
+  clip-path: polygon(0 0, 100% 0, 50% 70%);
+}
