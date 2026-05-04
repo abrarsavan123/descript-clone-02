@@ -252,6 +252,13 @@ function renderEditor() {
         <button id="restore-selection-btn" style="display:none">↩ Restore</button>
         <button id="clear-selection-btn">✕ Clear</button>
       </div>
+      <div class="context-popup" id="context-popup">
+        <span id="popup-info"></span>
+        <button id="popup-delete-btn">🗑 Delete</button>
+        <button id="popup-restore-btn">↩ Restore</button>
+        <button id="popup-copy-btn">📋 Copy</button>
+        <button id="popup-close-btn">✕</button>
+      </div>
       <div class="workspace">
         <div class="video-pane">
           <div class="video-container">
@@ -395,30 +402,63 @@ function initEditor() {
   // Start RAF loop on initial load if video is already playing
   if (!video.paused) startRAFLoop();
 
-  // ── Transcript word click / selection ──
-  transcriptEl.addEventListener('click', (e) => {
+  // ── Drag-to-select words ──
+  let isDragging = false;
+  let dragAnchorIdx = -1; // The word where mousedown started
+
+  transcriptEl.addEventListener('mousedown', (e) => {
     const wordEl = e.target.closest('.word');
     if (!wordEl) return;
     const idx = parseInt(wordEl.dataset.idx);
 
-    // If clicking a deleted word (without shift), restore it immediately
+    // If clicking a deleted word (without shift/drag intent), restore it
     if (isWordDeleted(idx) && !e.shiftKey) {
       restoreWord(idx);
       return;
     }
 
+    e.preventDefault(); // Prevent browser text selection
+
     if (e.shiftKey && state.selectionStart >= 0) {
+      // Shift+click extends selection
       state.selectionEnd = idx;
       if (state.selectionEnd < state.selectionStart) {
         [state.selectionStart, state.selectionEnd] = [state.selectionEnd, state.selectionStart];
       }
+      updateSelectionUI();
+      showContextPopup();
     } else {
+      // Start a new drag
+      isDragging = true;
+      dragAnchorIdx = idx;
       state.selectionStart = idx;
       state.selectionEnd = idx;
-      // Seek video to word start — pin-point, no lag
+      hideContextPopup();
+      // Seek video to word start
       seekTo(state.transcript.words[idx].start);
+      updateSelectionUI();
     }
+  });
+
+  transcriptEl.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const wordEl = e.target.closest('.word');
+    if (!wordEl) return;
+    const idx = parseInt(wordEl.dataset.idx);
+
+    // Extend selection from anchor to current word
+    state.selectionStart = Math.min(dragAnchorIdx, idx);
+    state.selectionEnd = Math.max(dragAnchorIdx, idx);
     updateSelectionUI();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!isDragging) return;
+    isDragging = false;
+    // Show floating popup if more than 1 word selected (or any selected)
+    if (state.selectionStart >= 0 && state.selectionEnd >= 0) {
+      showContextPopup();
+    }
   });
 
   // ── Keyboard shortcuts ──
@@ -438,9 +478,9 @@ function initEditor() {
   });
 
   // ── Buttons ──
-  document.getElementById('delete-selection-btn').onclick = deleteSelection;
-  document.getElementById('restore-selection-btn').onclick = restoreSelection;
-  document.getElementById('clear-selection-btn').onclick = clearSelection;
+  document.getElementById('delete-selection-btn').onclick = () => { deleteSelection(); hideContextPopup(); };
+  document.getElementById('restore-selection-btn').onclick = () => { restoreSelection(); hideContextPopup(); };
+  document.getElementById('clear-selection-btn').onclick = () => { clearSelection(); hideContextPopup(); };
   document.getElementById('restore-all-btn').onclick = restoreAll;
   document.getElementById('export-btn').onclick = handleExport;
   document.getElementById('close-modal').onclick = () => {
@@ -454,6 +494,7 @@ function initEditor() {
     state.selectionStart = 0;
     state.selectionEnd = state.transcript.words.length - 1;
     updateSelectionUI();
+    showContextPopup();
   };
   document.getElementById('copy-transcript-btn').onclick = copyTranscript;
   document.getElementById('follow-btn').onclick = () => {
@@ -464,8 +505,60 @@ function initEditor() {
     if (followPlayback) showToast('Auto-follow ON');
     else showToast('Auto-follow OFF');
   };
+
+  // ── Context popup buttons ──
+  document.getElementById('popup-delete-btn').onclick = () => { deleteSelection(); hideContextPopup(); };
+  document.getElementById('popup-restore-btn').onclick = () => { restoreSelection(); hideContextPopup(); };
+  document.getElementById('popup-copy-btn').onclick = () => {
+    if (state.selectionStart < 0) return;
+    const words = state.transcript.words;
+    const text = [];
+    for (let i = state.selectionStart; i <= state.selectionEnd; i++) {
+      if (!isWordDeleted(i)) text.push(words[i].text);
+    }
+    navigator.clipboard.writeText(text.join(' ')).then(() => showToast('Copied!')).catch(() => {});
+    hideContextPopup();
+  };
+  document.getElementById('popup-close-btn').onclick = () => { clearSelection(); hideContextPopup(); };
   document.getElementById('zoom-in').onclick = () => { state.zoom = Math.min(state.zoom * 1.5, 10); renderTimeline(); };
   document.getElementById('zoom-out').onclick = () => { state.zoom = Math.max(state.zoom / 1.5, 0.3); renderTimeline(); };
+
+  // ── Context popup positioning ──
+  function showContextPopup() {
+    const popup = document.getElementById('context-popup');
+    if (state.selectionStart < 0 || state.selectionEnd < 0) return;
+
+    // Get the position of the last selected word
+    const lastWordEl = transcriptEl.querySelector(`.word[data-idx="${state.selectionEnd}"]`);
+    if (!lastWordEl) return;
+
+    const wordRect = lastWordEl.getBoundingClientRect();
+    const containerRect = document.querySelector('.editor').getBoundingClientRect();
+
+    // Position popup below the last selected word
+    popup.style.top = (wordRect.bottom - containerRect.top + 8) + 'px';
+    popup.style.left = (wordRect.left - containerRect.left) + 'px';
+
+    // Update popup info
+    const count = state.selectionEnd - state.selectionStart + 1;
+    document.getElementById('popup-info').textContent = `${count} word${count > 1 ? 's' : ''}`;
+
+    // Show/hide delete vs restore based on selection content
+    let hasDeleted = false, hasActive = false;
+    for (let i = state.selectionStart; i <= state.selectionEnd; i++) {
+      if (isWordDeleted(i)) hasDeleted = true;
+      else hasActive = true;
+    }
+    document.getElementById('popup-delete-btn').style.display = hasActive ? '' : 'none';
+    document.getElementById('popup-restore-btn').style.display = hasDeleted ? '' : 'none';
+
+    popup.classList.add('visible');
+  }
+
+  function hideContextPopup() {
+    const popup = document.getElementById('context-popup');
+    if (popup) popup.classList.remove('visible');
+  }
 
   // ── Render helpers ──
   // Determine which scene a word belongs to (returns scene index for alternating colors)

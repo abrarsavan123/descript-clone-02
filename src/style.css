@@ -821,6 +821,54 @@ input { font-family: var(--font); }
 
 .selection-bar button:hover { background: rgba(255,255,255,0.3); }
 
+/* ─── Context Popup (floating after drag-select) ────────── */
+.context-popup {
+  display: none;
+  position: absolute;
+  z-index: 500;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md), 0 0 20px rgba(108, 92, 231, 0.1);
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  animation: popup-in 0.15s ease-out;
+}
+
+.context-popup.visible { display: flex; }
+
+.context-popup span {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-right: 4px;
+}
+
+.context-popup button {
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  transition: all var(--transition);
+}
+
+.context-popup button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+@keyframes popup-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* ─── Toast notifications ───────────────────────────────── */
 .toast {
   position: fixed;
